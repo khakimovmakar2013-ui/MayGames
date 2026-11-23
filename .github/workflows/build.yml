@@ -1,5 +1,7 @@
 name: Build APK
 on: [push, workflow_dispatch]
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -38,6 +40,7 @@ jobs:
               implementation(bom)
               implementation("androidx.activity:activity-compose:1.9.3")
               implementation("androidx.core:core-ktx:1.15.0")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
               implementation("androidx.compose.ui:ui")
               implementation("androidx.compose.foundation:foundation")
               implementation("androidx.compose.material3:material3")
@@ -56,7 +59,9 @@ jobs:
                   </intent>
               </queries>
               <application
-                  android:allowBackup="true"
+                  android:allowBackup="false"
+                  android:usesCleartextTraffic="false"
+                  android:supportsRtl="true"
                   android:icon="@mipmap/ic_launcher"
                   android:label="MayGames"
                   android:theme="@style/Theme.May">
@@ -142,6 +147,8 @@ jobs:
               }
 
               private fun launchGame(g: GameItem) {
+                  // запускаем только то, что есть в нашей библиотеке (чужие пакеты из вне не принимаем)
+                  if (store.games.none { it.pkg == g.pkg }) return
                   store.recordLaunch(g.pkg)
                   val intent = packageManager.getLaunchIntentForPackage(g.pkg)
                   if (intent == null) {
@@ -151,14 +158,19 @@ jobs:
                       return
                   }
                   applyProfile(g.pkg)
-                  startActivity(intent)
+                  try {
+                      startActivity(intent)
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "Не удалось запустить", Toast.LENGTH_SHORT).show()
+                      store.finishSession()
+                  }
               }
 
               private fun applyProfile(pkg: String) {
                   val vol = store.volume(pkg)
                   if (vol >= 0) {
                       val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                      am.setStreamVolume(AudioManager.STREAM_MUSIC, vol * am.getStreamMaxVolume(AudioManager.STREAM_MUSIC) / 100, 0)
+                      am.setStreamVolume(AudioManager.STREAM_MUSIC, vol.coerceIn(0, 100) * am.getStreamMaxVolume(AudioManager.STREAM_MUSIC) / 100, 0)
                   }
                   val br = store.brightness(pkg)
                   if (br >= 0 && Settings.System.canWrite(this)) {
@@ -166,7 +178,7 @@ jobs:
                           val prev = Settings.System.getInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128)
                           if (store.savedBrightness < 0) store.savedBrightness = prev
                           Settings.System.putInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
-                          Settings.System.putInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, br * 255 / 100)
+                          Settings.System.putInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, br.coerceIn(5, 100) * 255 / 100)
                       }
                   }
               }
@@ -535,7 +547,7 @@ jobs:
                               Spacer(Modifier.width(10.dp))
                               Column(Modifier.weight(1f)) {
                                   Text(g.name, color = t.text, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                  Text("${genreLabel(s.lang, s.tagOf(g))} · ${fmtTime(s.playtime[g.pkg] ?: 0)}", color = t.sub, fontSize = 12.sp)
+                                  Text("${genreLabel(s.lang, s.tagOf(g))} · ${fmtTime(s.playtime[g.pkg] ?: 0L)}", color = t.sub, fontSize = 12.sp)
                               }
                               SoftButton(if (g.pkg in s.favs) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, { s.favs.toggle(g.pkg) }, size = 34.dp, active = g.pkg in s.favs)
                               Spacer(Modifier.width(6.dp))
@@ -809,7 +821,7 @@ jobs:
               var rightHand by mutableStateOf(sp.getBoolean("right", true)); private set
               var lang by mutableStateOf(sp.getString("lang", "ru")!!); private set
               var showAll by mutableStateOf(sp.getBoolean("all", false)); private set
-              var sort by mutableStateOf(Sort.valueOf(sp.getString("sort", "ORDER")!!)); private set
+              var sort by mutableStateOf(runCatching { Sort.valueOf(sp.getString("sort", "ORDER") ?: "ORDER") }.getOrDefault(Sort.ORDER)); private set
               var current by mutableStateOf(sp.getString("cur", null)); private set
               var games by mutableStateOf(listOf<GameItem>()); private set
 
@@ -895,8 +907,8 @@ jobs:
                   return when (sort) {
                       Sort.ORDER -> base
                       Sort.NAME -> base.sortedBy { it.name.lowercase() }
-                      Sort.TIME -> base.sortedByDescending { playtime[it.pkg] ?: 0 }
-                      Sort.RECENT -> base.sortedByDescending { lastPlayed[it.pkg] ?: 0 }
+                      Sort.TIME -> base.sortedByDescending { playtime[it.pkg] ?: 0L }
+                      Sort.RECENT -> base.sortedByDescending { lastPlayed[it.pkg] ?: 0L }
                   }
               }
 
@@ -931,7 +943,7 @@ jobs:
               /** «Моя волна»: игры выбранных жанров, сначала наименее игранные. */
               fun wave(genres: Set<String>): List<GameItem> =
                   visible().filter { genres.isEmpty() || tagOf(it) in genres }
-                      .sortedBy { playtime[it.pkg] ?: 0 }
+                      .sortedBy { playtime[it.pkg] ?: 0L }
 
               // ---- сессии ----
               fun recordLaunch(pkg: String) {
@@ -1248,7 +1260,7 @@ jobs:
           include(":app")
           MAYEOF_13
       - name: Build
-        run: cd MayGames && gradle assembleDebug
+        run: cd MayGames && gradle assembleDebug --no-daemon --console=plain
       - uses: actions/upload-artifact@v4
         with:
           name: MayGames-apk
