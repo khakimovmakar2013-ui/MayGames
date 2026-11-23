@@ -1,0 +1,1256 @@
+name: Build APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.10.2 }
+      - name: Create project files
+        run: |
+          mkdir MayGames && cd MayGames
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'MAYEOF_0'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+          android {
+              namespace = "com.may.games"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "com.may.games"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              buildTypes { release { isMinifyEnabled = false } }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+          }
+          dependencies {
+              val bom = platform("androidx.compose:compose-bom:2024.10.01")
+              implementation(bom)
+              implementation("androidx.activity:activity-compose:1.9.3")
+              implementation("androidx.core:core-ktx:1.15.0")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+          }
+          MAYEOF_0
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'MAYEOF_1'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="MayGames"
+                  android:theme="@style/Theme.May">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          MAYEOF_1
+          mkdir -p $(dirname app/src/main/java/com/may/games/MainActivity.kt)
+          cat > app/src/main/java/com/may/games/MainActivity.kt <<'MAYEOF_2'
+          package com.may.games
+
+          import android.app.Activity
+          import android.content.Context
+          import android.media.AudioManager
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Toast
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.BackHandler
+          import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.ExperimentalLayoutApi
+          import androidx.compose.foundation.layout.FlowRow
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.navigationBarsPadding
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.statusBarsPadding
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.rounded.Favorite
+          import androidx.compose.material.icons.rounded.GraphicEq
+          import androidx.compose.material.icons.rounded.Home
+          import androidx.compose.material.icons.rounded.PlaylistAdd
+          import androidx.compose.material.icons.rounded.Palette
+          import androidx.compose.material.icons.rounded.Search
+          import androidx.compose.material.icons.rounded.Settings
+          import androidx.compose.material.icons.rounded.Tune
+          import androidx.compose.material.icons.rounded.VisibilityOff
+          import androidx.compose.material.icons.rounded.Waves
+          import androidx.compose.material3.ExperimentalMaterial3Api
+          import androidx.compose.material3.ModalBottomSheet
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.CompositionLocalProvider
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.SideEffect
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.saveable.rememberSaveable
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.platform.LocalView
+          import androidx.compose.ui.unit.dp
+          import androidx.core.view.WindowCompat
+
+          class MainActivity : ComponentActivity() {
+              private lateinit var store: Store
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  enableEdgeToEdge()
+                  store = Store(applicationContext)
+                  setContent { App(store, ::launchGame) }
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  store.finishSession()      // добавить время сессии
+                  restoreBrightness()
+              }
+
+              private fun launchGame(g: GameItem) {
+                  store.recordLaunch(g.pkg)
+                  val intent = packageManager.getLaunchIntentForPackage(g.pkg)
+                  if (intent == null) {
+                      val msg = if (g.pkg.startsWith("demo.")) "Демо-игра — установите настоящие игры" else "Не удалось запустить"
+                      Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                      store.finishSession()
+                      return
+                  }
+                  applyProfile(g.pkg)
+                  startActivity(intent)
+              }
+
+              private fun applyProfile(pkg: String) {
+                  val vol = store.volume(pkg)
+                  if (vol >= 0) {
+                      val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                      am.setStreamVolume(AudioManager.STREAM_MUSIC, vol * am.getStreamMaxVolume(AudioManager.STREAM_MUSIC) / 100, 0)
+                  }
+                  val br = store.brightness(pkg)
+                  if (br >= 0 && Settings.System.canWrite(this)) {
+                      runCatching {
+                          val prev = Settings.System.getInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128)
+                          if (store.savedBrightness < 0) store.savedBrightness = prev
+                          Settings.System.putInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
+                          Settings.System.putInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, br * 255 / 100)
+                      }
+                  }
+              }
+
+              private fun restoreBrightness() {
+                  val prev = store.savedBrightness
+                  if (prev >= 0 && Settings.System.canWrite(this)) {
+                      runCatching { Settings.System.putInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, prev) }
+                      store.savedBrightness = -1
+                  }
+              }
+          }
+
+          @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+          @Composable
+          fun App(s: Store, launch: (GameItem) -> Unit) {
+              val t = THEMES[s.theme]
+              var screen by rememberSaveable { mutableStateOf(Screen.Hub) }
+              var libTab by rememberSaveable { mutableIntStateOf(0) }
+              var menu by rememberSaveable { mutableStateOf(false) }
+
+              LaunchedEffect(s.showAll) { s.refresh() }
+              BackHandler(screen != Screen.Hub) { screen = Screen.Hub }
+
+              val view = LocalView.current
+              SideEffect {
+                  val w = (view.context as Activity).window
+                  val c = WindowCompat.getInsetsController(w, view)
+                  c.isAppearanceLightStatusBars = t.kind == 0
+                  c.isAppearanceLightNavigationBars = t.kind == 0
+              }
+
+              val go: (Screen) -> Unit = { screen = it }
+              val open: () -> Unit = { menu = true }
+
+              CompositionLocalProvider(LocalT provides t, LocalLang provides s.lang) {
+                  Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(t.bgTop, t.bgBottom)))) {
+                      if (t.kind != 0) Canvas(Modifier.fillMaxSize()) {
+                          drawCircle(
+                              Brush.radialGradient(listOf(t.accent.copy(alpha = 0.28f), Color.Transparent), Offset(size.width * 0.8f, size.height * 0.2f), size.width * 0.7f),
+                              size.width * 0.7f, Offset(size.width * 0.8f, size.height * 0.2f),
+                          )
+                      }
+                      if (screen == Screen.Hub) {
+                          HubScreen(s, go, open, launch)
+                      } else {
+                          Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 16.dp)) {
+                              Box(Modifier.weight(1f)) {
+                                  when (screen) {
+                                      Screen.Library -> LibraryScreen(s, libTab, go, open, launch)
+                                      Screen.Profile -> ProfileScreen(s, go, open)
+                                      Screen.Wave -> WaveScreen(s, go, open)
+                                      Screen.Themes -> ThemesScreen(s, go, open)
+                                      Screen.Settings -> SettingsScreen(s, go, open)
+                                      Screen.Hub -> {}
+                                  }
+                              }
+                              MiniBar(s, launch) { screen = Screen.Hub }
+                          }
+                      }
+                      if (menu) {
+                          ModalBottomSheet(
+                              onDismissRequest = { menu = false },
+                              containerColor = if (t.kind == 0) Color.White else Color(0xFF1B1520),
+                          ) {
+                              FlowRow(
+                                  Modifier.padding(16.dp).navigationBarsPadding(),
+                                  horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                  verticalArrangement = Arrangement.spacedBy(8.dp),
+                              ) {
+                                  fun nav(sc: Screen, tab: Int = 0) { libTab = tab; screen = sc; menu = false }
+                                  MayChip(tr("Главная", "Home"), { nav(Screen.Hub) }, icon = Icons.Rounded.Home)
+                                  MayChip(tr("Профиль запуска", "Launch profile"), { nav(Screen.Profile) }, icon = Icons.Rounded.Tune)
+                                  MayChip(tr("Библиотека", "Library"), { nav(Screen.Library) }, icon = Icons.Rounded.Search)
+                                  MayChip(tr("Очередь", "Queue"), { nav(Screen.Library, 2) }, icon = Icons.Rounded.PlaylistAdd)
+                                  MayChip(tr("Любимое", "Favorites"), { nav(Screen.Library, 1) }, icon = Icons.Rounded.Favorite)
+                                  MayChip(tr("Моя подборка", "My mix"), { nav(Screen.Wave) }, icon = Icons.Rounded.Waves)
+                                  MayChip(tr("Скрытые", "Hidden"), { nav(Screen.Library, 3) }, icon = Icons.Rounded.VisibilityOff)
+                                  MayChip(tr("Темы", "Themes"), { nav(Screen.Themes) }, icon = Icons.Rounded.Palette)
+                                  MayChip(tr("Настройки", "Settings"), { nav(Screen.Settings) }, icon = Icons.Rounded.Settings)
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+          MAYEOF_2
+          mkdir -p $(dirname app/src/main/java/com/may/games/Screens.kt)
+          cat > app/src/main/java/com/may/games/Screens.kt <<'MAYEOF_3'
+          package com.may.games
+
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.provider.Settings
+          import androidx.compose.foundation.ExperimentalFoundationApi
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.combinedClickable
+          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.ExperimentalLayoutApi
+          import androidx.compose.foundation.layout.FlowRow
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.aspectRatio
+          import androidx.compose.foundation.layout.fillMaxHeight
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.navigationBarsPadding
+          import androidx.compose.foundation.layout.offset
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.statusBarsPadding
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.grid.GridCells
+          import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+          import androidx.compose.foundation.lazy.grid.items
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.rounded.Favorite
+          import androidx.compose.material.icons.rounded.FavoriteBorder
+          import androidx.compose.material.icons.rounded.GraphicEq
+          import androidx.compose.material.icons.rounded.PlayArrow
+          import androidx.compose.material.icons.rounded.PlaylistAdd
+          import androidx.compose.material.icons.rounded.Search
+          import androidx.compose.material.icons.rounded.Shuffle
+          import androidx.compose.material.icons.rounded.SkipNext
+          import androidx.compose.material.icons.rounded.SkipPrevious
+          import androidx.compose.material.icons.rounded.Sort
+          import androidx.compose.material.icons.rounded.SwapHoriz
+          import androidx.compose.material.icons.rounded.ThumbDown
+          import androidx.compose.material.icons.rounded.Tune
+          import androidx.compose.material.icons.rounded.Waves
+          import androidx.compose.material3.AlertDialog
+          import androidx.compose.material3.SliderDefaults
+          import androidx.compose.material3.Slider
+          import androidx.compose.material3.Switch
+          import androidx.compose.material3.SwitchDefaults
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
+          import androidx.compose.material3.TextField
+          import androidx.compose.material3.TextFieldDefaults
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableFloatStateOf
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlin.math.cos
+          import kotlin.math.sin
+
+          enum class Screen { Hub, Library, Profile, Wave, Themes, Settings }
+
+          private fun genreLabel(lang: String, g: String) =
+              if (lang == "ru") g else GENRES_EN[GENRES.indexOf(g).coerceAtLeast(0)]
+
+          // =============================== HUB ===============================
+
+          @Composable
+          fun HubScreen(s: Store, go: (Screen) -> Unit, onMenu: () -> Unit, launch: (GameItem) -> Unit) {
+              val t = LocalT.current
+              val cur = s.currentGame()
+              val played = cur?.let { s.playtime[it.pkg] } ?: 0L
+              val goalMs = listOf(1, 5, 10, 25, 50, 100, 250, 500).map { it * 3_600_000L }
+                  .firstOrNull { it > played } ?: (500 * 3_600_000L)
+
+              Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 16.dp)) {
+                  TopBar(
+                      tr("Сейчас играет", "Now playing"), onMenu,
+                      right = Icons.Rounded.SwapHoriz, onRight = { s.setHand(!s.rightHand) },
+                  )
+                  Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                      WaveCover(Modifier.fillMaxHeight(0.95f).aspectRatio(1f)) {
+                          GameIcon(cur, 96.dp)
+                          Column(Modifier.align(Alignment.BottomStart).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                              SoftButton(Icons.Rounded.ThumbDown, { cur?.let { s.hidden.toggle(it.pkg); s.next() } }, size = 36.dp)
+                              SoftButton(
+                                  if (cur != null && cur.pkg in s.favs) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                  { cur?.let { s.favs.toggle(it.pkg) } }, size = 36.dp,
+                                  active = cur != null && cur.pkg in s.favs,
+                              )
+                          }
+                          SoftButton(Icons.Rounded.Tune, { go(Screen.Profile) }, Modifier.align(Alignment.BottomEnd).padding(12.dp), size = 36.dp)
+                      }
+                  }
+                  Column(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                      Text(
+                          cur?.name ?: tr("Игр не найдено", "No games found"), color = t.text, fontSize = 22.sp,
+                          fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                      )
+                      Text(cur?.let { genreLabel(s.lang, s.tagOf(it)) } ?: "", color = t.sub, fontSize = 13.sp)
+                  }
+                  Spacer(Modifier.height(10.dp))
+                  ProgressLine(if (goalMs == 0L) 0f else played.toFloat() / goalMs)
+                  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                      Text(fmtTime(played), color = t.sub, fontSize = 11.sp)
+                      Text(fmtTime(goalMs), color = t.sub, fontSize = 11.sp)
+                  }
+                  Spacer(Modifier.height(6.dp))
+
+                  // Нижняя «зона большого пальца»: дуга кнопок + список «Далее». Зеркалится для левши.
+                  val arc: @Composable () -> Unit = { ArcControls(s, s.rightHand, cur, go, launch) }
+                  val next: @Composable (Modifier) -> Unit = { m -> UpNext(s, m) }
+                  Row(Modifier.fillMaxWidth().height(230.dp)) {
+                      if (s.rightHand) { next(Modifier.weight(1f)); arc() } else { arc(); next(Modifier.weight(1f)) }
+                  }
+                  Spacer(Modifier.height(4.dp))
+                  Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                      MayChip(tr("Профиль запуска", "Launch profile"), { go(Screen.Profile) }, icon = Icons.Rounded.Tune)
+                      MayChip(if (s.rightHand) tr("Правша", "Right hand") else tr("Левша", "Left hand"),
+                          { s.setHand(!s.rightHand) }, selected = true, icon = Icons.Rounded.SwapHoriz)
+                  }
+              }
+          }
+
+          private class ArcBtn(
+              val icon: androidx.compose.ui.graphics.vector.ImageVector, val r: Float, val a: Float,
+              val size: Float = 40f, val active: Boolean = false, val act: () -> Unit,
+          )
+
+          @Composable
+          private fun ArcControls(s: Store, right: Boolean, cur: GameItem?, go: (Screen) -> Unit, launch: (GameItem) -> Unit) {
+              val w = 204f; val h = 230f; val cy = h / 2; val playR = 46f
+              val cx = if (right) w - 52f else 52f
+              val dir = if (right) -1f else 1f
+              val isFav = cur != null && cur.pkg in s.favs
+              val btns = listOf(
+                  ArcBtn(Icons.Rounded.Shuffle, 80f, 90f) { s.random() },
+                  ArcBtn(Icons.Rounded.SkipPrevious, 80f, 45f) { s.prev() },
+                  ArcBtn(Icons.Rounded.SkipNext, 80f, 0f) { s.next() },
+                  ArcBtn(if (isFav) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, 80f, -45f, active = isFav) { cur?.let { s.favs.toggle(it.pkg) } },
+                  ArcBtn(Icons.Rounded.PlaylistAdd, 80f, -90f, active = cur != null && cur.pkg in s.queue) { cur?.let { s.queue.toggle(it.pkg) } },
+                  ArcBtn(Icons.Rounded.Search, 132f, 38f, 36f) { go(Screen.Library) },
+                  ArcBtn(Icons.Rounded.Waves, 132f, -38f, 36f) { go(Screen.Wave) },
+              )
+              Box(Modifier.size(w.dp, h.dp)) {
+                  btns.forEach { b ->
+                      val rad = Math.toRadians(b.a.toDouble())
+                      val x = cx + dir * b.r * cos(rad).toFloat() - b.size / 2
+                      val y = cy - b.r * sin(rad).toFloat() - b.size / 2
+                      SoftButton(b.icon, b.act, Modifier.offset(x.dp, y.dp), size = b.size.dp, active = b.active)
+                  }
+                  SoftButton(
+                      Icons.Rounded.PlayArrow, { cur?.let(launch) },
+                      Modifier.offset((cx - playR).dp, (cy - playR).dp), size = (playR * 2).dp, accent = true,
+                  )
+              }
+          }
+
+          @Composable
+          private fun UpNext(s: Store, modifier: Modifier) {
+              val t = LocalT.current
+              Column(modifier.padding(horizontal = 8.dp)) {
+                  SectionLabel(tr("Далее", "Up next"))
+                  s.upNext(3).forEach { g ->
+                      Row(
+                          Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(t.card)
+                              .clickable { s.select(g.pkg) }.padding(8.dp),
+                          verticalAlignment = Alignment.CenterVertically,
+                      ) {
+                          GameIcon(g, 34.dp)
+                          Spacer(Modifier.width(8.dp))
+                          Column {
+                              Text(g.name, color = t.text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                              Text(genreLabel(s.lang, s.tagOf(g)), color = t.sub, fontSize = 10.sp, maxLines = 1)
+                          }
+                      }
+                      Spacer(Modifier.height(6.dp))
+                  }
+                  MayChip(if (s.lang == "ru") s.sort.ru else s.sort.en, { s.cycleSort() }, icon = Icons.Rounded.Sort)
+              }
+          }
+
+          // ============================ MINI PLAYER ============================
+
+          @Composable
+          fun MiniBar(s: Store, launch: (GameItem) -> Unit, onOpen: () -> Unit) {
+              val t = LocalT.current
+              val cur = s.currentGame() ?: return
+              Row(
+                  Modifier.fillMaxWidth().padding(vertical = 8.dp).clip(RoundedCornerShape(22.dp)).background(t.card)
+                      .clickable(onClick = onOpen).padding(10.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+              ) {
+                  GameIcon(cur, 40.dp)
+                  Spacer(Modifier.width(10.dp))
+                  Column(Modifier.weight(1f)) {
+                      Text(cur.name, color = t.text, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                      Text(genreLabel(s.lang, s.tagOf(cur)), color = t.sub, fontSize = 11.sp)
+                  }
+                  SoftButton(Icons.Rounded.SkipPrevious, { s.prev() }, size = 36.dp)
+                  Spacer(Modifier.width(6.dp))
+                  SoftButton(Icons.Rounded.PlayArrow, { launch(cur) }, size = 42.dp, accent = true)
+                  Spacer(Modifier.width(6.dp))
+                  SoftButton(Icons.Rounded.SkipNext, { s.next() }, size = 36.dp)
+              }
+          }
+
+          // ============================== LIBRARY ==============================
+
+          @OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
+          @Composable
+          fun LibraryScreen(s: Store, tab0: Int, go: (Screen) -> Unit, onMenu: () -> Unit, launch: (GameItem) -> Unit) {
+              val t = LocalT.current
+              var q by remember { mutableStateOf("") }
+              var tab by remember(tab0) { mutableIntStateOf(tab0) }
+              var edit by remember { mutableStateOf<GameItem?>(null) }
+              val tabs = listOf(tr("Все", "All"), tr("Любимое", "Favorites"), tr("Очередь", "Queue"), tr("Скрытые", "Hidden"))
+              val byPkg = s.games.associateBy { it.pkg }
+              val list = when (tab) {
+                  0 -> s.visible()
+                  1 -> s.visible().filter { it.pkg in s.favs }
+                  2 -> s.queue.items.mapNotNull { byPkg[it] }
+                  else -> s.games.filter { it.pkg in s.hidden }
+              }.filter { q.isBlank() || it.name.contains(q, ignoreCase = true) }
+
+              Column(Modifier.fillMaxSize()) {
+                  BackBar(tr("Библиотека", "Library"), { go(Screen.Hub) }, onMenu)
+                  TextField(
+                      value = q, onValueChange = { q = it }, singleLine = true,
+                      placeholder = { Text(tr("Поиск игры", "Search games")) },
+                      leadingIcon = { androidx.compose.material3.Icon(Icons.Rounded.Search, null) },
+                      shape = RoundedCornerShape(50), modifier = Modifier.fillMaxWidth(),
+                      colors = TextFieldDefaults.colors(
+                          focusedContainerColor = t.card, unfocusedContainerColor = t.card,
+                          focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
+                          focusedTextColor = t.text, unfocusedTextColor = t.text,
+                          focusedPlaceholderColor = t.sub, unfocusedPlaceholderColor = t.sub,
+                          focusedLeadingIconColor = t.accent, unfocusedLeadingIconColor = t.sub, cursorColor = t.accent,
+                      ),
+                  )
+                  Row(Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      tabs.forEachIndexed { i, n -> MayChip(n, { tab = i }, selected = tab == i) }
+                  }
+                  LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
+                      items(list, key = { it.pkg }) { g ->
+                          Row(
+                              Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(t.card)
+                                  .combinedClickable(onClick = { s.select(g.pkg); go(Screen.Hub) }, onLongClick = { edit = g })
+                                  .padding(10.dp),
+                              verticalAlignment = Alignment.CenterVertically,
+                          ) {
+                              GameIcon(g, 44.dp)
+                              Spacer(Modifier.width(10.dp))
+                              Column(Modifier.weight(1f)) {
+                                  Text(g.name, color = t.text, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                  Text("${genreLabel(s.lang, s.tagOf(g))} · ${fmtTime(s.playtime[g.pkg] ?: 0)}", color = t.sub, fontSize = 12.sp)
+                              }
+                              SoftButton(if (g.pkg in s.favs) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, { s.favs.toggle(g.pkg) }, size = 34.dp, active = g.pkg in s.favs)
+                              Spacer(Modifier.width(6.dp))
+                              SoftButton(Icons.Rounded.PlaylistAdd, { s.queue.toggle(g.pkg) }, size = 34.dp, active = g.pkg in s.queue)
+                              Spacer(Modifier.width(6.dp))
+                              SoftButton(Icons.Rounded.PlayArrow, { launch(g) }, size = 34.dp, accent = true)
+                          }
+                      }
+                  }
+              }
+
+              edit?.let { g ->
+                  AlertDialog(
+                      onDismissRequest = { edit = null },
+                      containerColor = if (t.kind == 0) Color.White else Color(0xFF1B1520),
+                      title = { Text(g.name, color = t.text) },
+                      text = {
+                          Column {
+                              SectionLabel(tr("Редактор тегов", "Tag editor"))
+                              FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                  GENRES.forEach { gn -> MayChip(genreLabel(s.lang, gn), { s.setTag(g.pkg, gn) }, selected = s.tagOf(g) == gn) }
+                              }
+                          }
+                      },
+                      confirmButton = { TextButton({ edit = null }) { Text("OK", color = t.accent) } },
+                      dismissButton = {
+                          TextButton({ s.hidden.toggle(g.pkg); edit = null }) {
+                              Text(if (g.pkg in s.hidden) tr("Показать", "Unhide") else tr("Скрыть", "Hide"), color = t.sub)
+                          }
+                      },
+                  )
+              }
+          }
+
+          // =============================== PROFILE ===============================
+
+          private class Preset(val ru: String, val en: String, val vol: Int, val br: Int)
+
+          private val PRESETS = listOf(
+              Preset("Normal", "Normal", -1, -1), Preset("Performance", "Performance", 80, 100),
+              Preset("Cinema", "Cinema", 100, 60), Preset("Night", "Night", 30, 15), Preset("Battery", "Battery", 50, 35),
+          )
+
+          @OptIn(ExperimentalLayoutApi::class)
+          @Composable
+          fun ProfileScreen(s: Store, go: (Screen) -> Unit, onMenu: () -> Unit) {
+              val t = LocalT.current
+              val ctx = LocalContext.current
+              val cur = s.currentGame()
+              val pkg = cur?.pkg ?: ""
+              var vol by remember(pkg) { mutableFloatStateOf(s.volume(pkg).toFloat()) }   // -1 = выкл.
+              var br by remember(pkg) { mutableFloatStateOf(s.brightness(pkg).toFloat()) }
+              var saved by remember(pkg) { mutableStateOf(false) }
+              val canWrite = Settings.System.canWrite(ctx)
+              val sliderColors = SliderDefaults.colors(
+                  thumbColor = t.accent, activeTrackColor = t.accent, inactiveTrackColor = t.text.copy(alpha = 0.15f),
+              )
+
+              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                  BackBar(tr("Профиль запуска", "Launch profile"), { go(Screen.Hub) }, onMenu)
+                  Text(cur?.name ?: "", color = t.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                  Text(tr("Применяется автоматически при запуске этой игры", "Applied automatically when this game starts"), color = t.sub, fontSize = 12.sp)
+
+                  SectionLabel(tr("Пресеты", "Presets"))
+                  Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      PRESETS.forEach { p ->
+                          MayChip(if (s.lang == "ru") p.ru else p.en, {
+                              vol = p.vol.toFloat(); br = p.br.toFloat(); saved = false
+                          }, selected = vol.toInt() == p.vol && br.toInt() == p.br)
+                      }
+                  }
+
+                  SliderCard(tr("Громкость", "Volume"), vol, 0f..100f, sliderColors,
+                      onChange = { vol = it; saved = false }, onToggle = { vol = if (vol >= 0) -1f else 70f; saved = false })
+                  SliderCard(tr("Яркость", "Brightness"), br, 0f..100f, sliderColors,
+                      onChange = { br = it; saved = false }, onToggle = { br = if (br >= 0) -1f else 70f; saved = false })
+
+                  if (!canWrite) {
+                      Spacer(Modifier.height(8.dp))
+                      Text(tr("Для яркости нужно разрешение «Изменение системных настроек».", "Brightness needs the “Modify system settings” permission."), color = t.sub, fontSize = 12.sp)
+                      MayChip(tr("Выдать разрешение", "Grant permission"), {
+                          ctx.startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:${ctx.packageName}")))
+                      })
+                  }
+                  Spacer(Modifier.height(14.dp))
+                  MayChip(
+                      if (saved) tr("Сохранено ✓", "Saved ✓") else tr("Сохранить для этой игры", "Save for this game"),
+                      { if (cur != null) { s.saveProfile(pkg, vol.toInt(), br.toInt()); saved = true } }, selected = true,
+                  )
+              }
+          }
+
+          @Composable
+          private fun SliderCard(
+              title: String, value: Float, range: ClosedFloatingPointRange<Float>,
+              colors: androidx.compose.material3.SliderColors, onChange: (Float) -> Unit, onToggle: () -> Unit,
+          ) {
+              val t = LocalT.current
+              val on = value >= 0
+              Column(Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(22.dp)).background(t.card).padding(16.dp)) {
+                  Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                      Text(title.uppercase(), color = t.sub, fontSize = 11.sp, letterSpacing = 1.4.sp, modifier = Modifier.weight(1f))
+                      Text(if (on) "${value.toInt()}%" else tr("Выкл.", "Off"), color = t.sub, fontSize = 12.sp)
+                      Spacer(Modifier.width(8.dp))
+                      Switch(on, { onToggle() }, colors = SwitchDefaults.colors(checkedTrackColor = t.accent, checkedThumbColor = Color.White))
+                  }
+                  Slider(if (on) value else 0f, onChange, valueRange = range, enabled = on, colors = colors)
+              }
+          }
+
+          // ================================ WAVE ================================
+
+          @OptIn(ExperimentalLayoutApi::class)
+          @Composable
+          fun WaveScreen(s: Store, go: (Screen) -> Unit, onMenu: () -> Unit) {
+              val t = LocalT.current
+              var sel by remember { mutableStateOf(setOf<String>()) }
+              val list = s.wave(sel)
+              Column(Modifier.fillMaxSize()) {
+                  BackBar(tr("Моя подборка", "My mix"), { go(Screen.Hub) }, onMenu)
+                  Box(Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
+                      Box(
+                          Modifier.size(140.dp).clip(CircleShape).background(
+                              Brush.radialGradient(listOf(t.accent, t.accent.copy(alpha = 0.25f), Color.Transparent))
+                          ),
+                      )
+                      Text(tr("${list.size} игр", "${list.size} games"), color = if (t.kind == 0) t.text else Color.White, fontWeight = FontWeight.SemiBold)
+                  }
+                  Text(tr("Работает без интернета — подбираем из вашей библиотеки", "Works offline — picked from your library"), color = t.sub, fontSize = 12.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
+                  Spacer(Modifier.height(10.dp))
+                  FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                      GENRES.forEach { g ->
+                          MayChip(genreLabel(s.lang, g), { sel = if (g in sel) sel - g else sel + g }, selected = g in sel)
+                      }
+                  }
+                  Spacer(Modifier.height(12.dp))
+                  MayChip(tr("Играть подборку", "Play mix"), {
+                      list.firstOrNull()?.let { first ->
+                          s.select(first.pkg); s.setQueue(list.drop(1).take(10).map { it.pkg }); go(Screen.Hub)
+                      }
+                  }, selected = true, icon = Icons.Rounded.PlayArrow)
+                  Spacer(Modifier.height(10.dp))
+                  LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                      items(list, key = { it.pkg }) { g ->
+                          Row(
+                              Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(t.card)
+                                  .clickable { s.select(g.pkg); go(Screen.Hub) }.padding(8.dp),
+                              verticalAlignment = Alignment.CenterVertically,
+                          ) {
+                              GameIcon(g, 36.dp); Spacer(Modifier.width(10.dp))
+                              Text(g.name, color = t.text, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                              Text(genreLabel(s.lang, s.tagOf(g)), color = t.sub, fontSize = 11.sp)
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ================================ THEMES ================================
+
+          @Composable
+          fun ThemesScreen(s: Store, go: (Screen) -> Unit, onMenu: () -> Unit) {
+              val t = LocalT.current
+              Column(Modifier.fillMaxSize()) {
+                  BackBar(tr("Темы оформления", "Themes"), { go(Screen.Hub) }, onMenu)
+                  Text(tr("7 светлых · 6 тёмных · 6 чёрных OLED", "7 light · 6 dark · 6 black OLED"), color = t.sub, fontSize = 12.sp)
+                  Spacer(Modifier.height(10.dp))
+                  LazyVerticalGrid(GridCells.Fixed(3), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                      items(THEMES.size) { i ->
+                          val th = THEMES[i]
+                          val sel = s.theme == i
+                          Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                              Box(
+                                  Modifier.fillMaxWidth().aspectRatio(0.62f).clip(RoundedCornerShape(18.dp))
+                                      .background(Brush.verticalGradient(listOf(th.bgTop, th.bgBottom)))
+                                      .border(if (sel) 2.dp else 0.5.dp, if (sel) th.accent else t.sub.copy(alpha = 0.3f), RoundedCornerShape(18.dp))
+                                      .clickable { s.setTheme(i) },
+                                  contentAlignment = Alignment.Center,
+                              ) {
+                                  Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                      Box(Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).background(th.card))
+                                      Spacer(Modifier.height(10.dp))
+                                      Box(Modifier.size(38.dp).clip(CircleShape).background(th.accent))
+                                  }
+                              }
+                              Text(if (s.lang == "ru") th.ru else th.en, color = t.text, fontSize = 11.sp, maxLines = 1, modifier = Modifier.padding(top = 4.dp))
+                              Text(listOf(tr("светлая", "light"), tr("тёмная", "dark"), "OLED")[th.kind], color = t.sub, fontSize = 9.sp)
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ================================ SETTINGS ================================
+
+          @Composable
+          fun SettingsScreen(s: Store, go: (Screen) -> Unit, onMenu: () -> Unit) {
+              val t = LocalT.current
+              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                  BackBar(tr("Настройки", "Settings"), { go(Screen.Hub) }, onMenu)
+                  SectionLabel(tr("Управление одной рукой", "One-hand control"))
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      MayChip(tr("Левша", "Left"), { s.setHand(false) }, selected = !s.rightHand)
+                      MayChip(tr("Правша", "Right"), { s.setHand(true) }, selected = s.rightHand)
+                  }
+                  Text(tr("Кнопки собираются дугой вокруг Play под большим пальцем.", "Buttons form an arc around Play, under your thumb."), color = t.sub, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                  SectionLabel(tr("Язык", "Language"))
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      MayChip("RU", { s.setLang("ru") }, selected = s.lang == "ru")
+                      MayChip("EN", { s.setLang("en") }, selected = s.lang == "en")
+                  }
+                  SectionLabel(tr("Библиотека", "Library"))
+                  Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(t.card).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                      Column(Modifier.weight(1f)) {
+                          Text(tr("Показывать все приложения", "Show all apps"), color = t.text)
+                          Text(tr("Если игра не определилась как игра", "If a game isn't detected as one"), color = t.sub, fontSize = 12.sp)
+                      }
+                      Switch(s.showAll, { s.setShowAll(it) }, colors = SwitchDefaults.colors(checkedTrackColor = t.accent, checkedThumbColor = Color.White))
+                  }
+                  SectionLabel(tr("Оформление", "Appearance"))
+                  MayChip(tr("Темы (19)", "Themes (19)"), { go(Screen.Themes) })
+              }
+          }
+          MAYEOF_3
+          mkdir -p $(dirname app/src/main/java/com/may/games/Store.kt)
+          cat > app/src/main/java/com/may/games/Store.kt <<'MAYEOF_4'
+          package com.may.games
+
+          import android.content.Context
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.content.pm.ApplicationInfo
+          import android.os.Build
+          import android.os.SystemClock
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableStateListOf
+          import androidx.compose.runtime.mutableStateMapOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.graphics.ImageBitmap
+          import androidx.compose.ui.graphics.asImageBitmap
+          import androidx.core.graphics.drawable.toBitmap
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+
+          class GameItem(val pkg: String, val name: String, val icon: ImageBitmap?, val autoTag: String)
+
+          val GENRES = listOf("Экшен", "Гонки", "RPG", "Головоломки", "Стратегия", "Симулятор", "Шутер", "Инди", "Другое")
+          val GENRES_EN = listOf("Action", "Racing", "RPG", "Puzzle", "Strategy", "Simulator", "Shooter", "Indie", "Other")
+
+          enum class Sort(val ru: String, val en: String) {
+              ORDER("По порядку", "Default"), NAME("По имени", "By name"),
+              TIME("По времени игры", "By playtime"), RECENT("Недавние", "Recent")
+          }
+
+          class PkgList(private val sp: SharedPreferences, private val key: String) {
+              val items = mutableStateListOf<String>().apply {
+                  addAll(sp.getString(key, "")!!.split("|").filter { it.isNotEmpty() })
+              }
+              private fun save() = sp.edit().putString(key, items.joinToString("|")).apply()
+              operator fun contains(p: String) = p in items
+              fun toggle(p: String) { if (p in items) items.remove(p) else items.add(p); save() }
+              fun remove(p: String) { if (items.remove(p)) save() }
+          }
+
+          class Store(private val ctx: Context) {
+              private val sp = ctx.getSharedPreferences("may", Context.MODE_PRIVATE)
+
+              var theme by mutableIntStateOf(sp.getInt("theme", 0).coerceIn(0, THEMES.lastIndex)); private set
+              var rightHand by mutableStateOf(sp.getBoolean("right", true)); private set
+              var lang by mutableStateOf(sp.getString("lang", "ru")!!); private set
+              var showAll by mutableStateOf(sp.getBoolean("all", false)); private set
+              var sort by mutableStateOf(Sort.valueOf(sp.getString("sort", "ORDER")!!)); private set
+              var current by mutableStateOf(sp.getString("cur", null)); private set
+              var games by mutableStateOf(listOf<GameItem>()); private set
+
+              val favs = PkgList(sp, "favs")
+              val queue = PkgList(sp, "queue")
+              val hidden = PkgList(sp, "hidden")
+              val playtime = mutableStateMapOf<String, Long>()
+              val tags = mutableStateMapOf<String, String>()
+              private val lastPlayed = mutableStateMapOf<String, Long>()
+
+              fun setTheme(i: Int) { theme = i; sp.edit().putInt("theme", i).apply() }
+              fun setHand(right: Boolean) { rightHand = right; sp.edit().putBoolean("right", right).apply() }
+              fun setLang(l: String) { lang = l; sp.edit().putString("lang", l).apply() }
+              fun setShowAll(v: Boolean) { showAll = v; sp.edit().putBoolean("all", v).apply() }
+              fun cycleSort() {
+                  sort = Sort.values()[(sort.ordinal + 1) % Sort.values().size]
+                  sp.edit().putString("sort", sort.name).apply()
+              }
+              fun select(pkg: String) { current = pkg; queue.remove(pkg); sp.edit().putString("cur", pkg).apply() }
+              fun setTag(pkg: String, tag: String) { tags[pkg] = tag; sp.edit().putString("tag_$pkg", tag).apply() }
+              fun tagOf(g: GameItem) = tags[g.pkg] ?: g.autoTag
+
+              // ---- профиль игры (громкость / яркость при запуске) ----
+              fun volume(pkg: String) = sp.getInt("vol_$pkg", -1)
+              fun brightness(pkg: String) = sp.getInt("br_$pkg", -1)
+              fun saveProfile(pkg: String, vol: Int, br: Int) =
+                  sp.edit().putInt("vol_$pkg", vol).putInt("br_$pkg", br).apply()
+              var savedBrightness: Int
+                  get() = sp.getInt("prev_br", -1)
+                  set(v) { sp.edit().putInt("prev_br", v).apply() }
+
+              // ---- загрузка библиотеки ----
+              suspend fun refresh() {
+                  val list = withContext(Dispatchers.Default) { loadGames() }
+                  for (g in list) {
+                      playtime[g.pkg] = sp.getLong("pt_${g.pkg}", 0)
+                      lastPlayed[g.pkg] = sp.getLong("lp_${g.pkg}", 0)
+                      sp.getString("tag_${g.pkg}", null)?.let { tags[g.pkg] = it }
+                  }
+                  games = list
+              }
+
+              private fun loadGames(): List<GameItem> {
+                  val pm = ctx.packageManager
+                  val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  val found = pm.queryIntentActivities(intent, 0).mapNotNull { r ->
+                      val ai = r.activityInfo.applicationInfo
+                      if (ai.packageName == ctx.packageName) return@mapNotNull null
+                      @Suppress("DEPRECATION")
+                      val isGame = (ai.flags and ApplicationInfo.FLAG_IS_GAME) != 0 ||
+                          (Build.VERSION.SDK_INT >= 26 && ai.category == ApplicationInfo.CATEGORY_GAME)
+                      if (!isGame && !showAll) return@mapNotNull null
+                      val name = r.loadLabel(pm).toString()
+                      val icon = runCatching { pm.getApplicationIcon(ai).toBitmap(96, 96).asImageBitmap() }.getOrNull()
+                      GameItem(ai.packageName, name, icon, guessTag(name + " " + ai.packageName))
+                  }.distinctBy { it.pkg }
+                  return if (found.isEmpty()) demoGames() else found
+              }
+
+              private fun guessTag(s: String): String {
+                  val x = s.lowercase()
+                  return when {
+                      listOf("race", "racing", "drift", "car", "moto", "speed", "asphalt").any { it in x } -> "Гонки"
+                      listOf("shoot", "gun", "war", "sniper", "strike", "pubg", "cod", "fps").any { it in x } -> "Шутер"
+                      listOf("rpg", "legend", "quest", "genshin", "dragon", "hero", "fantasy").any { it in x } -> "RPG"
+                      listOf("puzzle", "match", "candy", "block", "word", "sudoku", "2048").any { it in x } -> "Головоломки"
+                      listOf("strategy", "clash", "empire", "kingdom", "tower", "defense", "chess").any { it in x } -> "Стратегия"
+                      listOf("sim", "farm", "tycoon", "city", "craft").any { it in x } -> "Симулятор"
+                      listOf("run", "jump", "ninja", "fight", "action", "battle").any { it in x } -> "Экшен"
+                      else -> "Другое"
+                  }
+              }
+
+              private fun demoGames() = listOf(
+                  "Аврора" to "Экшен", "Тихий вечер" to "Головоломки", "Лунный свет" to "RPG",
+                  "Горизонт" to "Гонки", "Импульс" to "Шутер", "Личный свет" to "Инди",
+                  "Вдохновение" to "Стратегия", "Рассвет" to "Симулятор",
+              ).mapIndexed { i, (n, t) -> GameItem("demo.$i", n, null, t) }
+
+              // ---- выборка ----
+              fun visible(): List<GameItem> {
+                  val base = games.filter { it.pkg !in hidden }
+                  return when (sort) {
+                      Sort.ORDER -> base
+                      Sort.NAME -> base.sortedBy { it.name.lowercase() }
+                      Sort.TIME -> base.sortedByDescending { playtime[it.pkg] ?: 0 }
+                      Sort.RECENT -> base.sortedByDescending { lastPlayed[it.pkg] ?: 0 }
+                  }
+              }
+
+              fun currentGame(): GameItem? {
+                  val v = visible()
+                  return v.firstOrNull { it.pkg == current } ?: v.firstOrNull()
+              }
+
+              fun upNext(n: Int): List<GameItem> {
+                  val v = visible()
+                  val cur = currentGame() ?: return emptyList()
+                  val byPkg = v.associateBy { it.pkg }
+                  val q = queue.items.mapNotNull { byPkg[it] }
+                  val i = v.indexOfFirst { it.pkg == cur.pkg }
+                  val rest = (v.drop(i + 1) + v.take(i))
+                  return (q + rest).filter { it.pkg != cur.pkg }.distinctBy { it.pkg }.take(n)
+              }
+
+              fun setQueue(pkgs: List<String>) {
+                  queue.items.clear(); queue.items.addAll(pkgs)
+                  sp.edit().putString("queue", pkgs.joinToString("|")).apply()
+              }
+
+              fun next() { upNext(1).firstOrNull()?.let { select(it.pkg) } }
+              fun prev() {
+                  val v = visible(); val cur = currentGame() ?: return
+                  val i = v.indexOfFirst { it.pkg == cur.pkg }
+                  if (v.size > 1) select(v[(i - 1 + v.size) % v.size].pkg)
+              }
+              fun random() { visible().filter { it.pkg != current }.randomOrNull()?.let { select(it.pkg) } }
+
+              /** «Моя волна»: игры выбранных жанров, сначала наименее игранные. */
+              fun wave(genres: Set<String>): List<GameItem> =
+                  visible().filter { genres.isEmpty() || tagOf(it) in genres }
+                      .sortedBy { playtime[it.pkg] ?: 0 }
+
+              // ---- сессии ----
+              fun recordLaunch(pkg: String) {
+                  sp.edit().putString("run_pkg", pkg).putLong("run_at", SystemClock.elapsedRealtime())
+                      .putLong("lp_$pkg", System.currentTimeMillis()).apply()
+                  lastPlayed[pkg] = System.currentTimeMillis()
+              }
+
+              /** Вызывается при возврате в хаб: прибавляет длительность сессии. */
+              fun finishSession() {
+                  val pkg = sp.getString("run_pkg", null) ?: return
+                  val at = sp.getLong("run_at", 0)
+                  sp.edit().remove("run_pkg").remove("run_at").apply()
+                  val dt = (SystemClock.elapsedRealtime() - at).coerceIn(0, 12L * 3600_000)
+                  if (dt < 5_000) return
+                  val total = (playtime[pkg] ?: sp.getLong("pt_$pkg", 0)) + dt
+                  playtime[pkg] = total
+                  sp.edit().putLong("pt_$pkg", total).apply()
+              }
+          }
+          MAYEOF_4
+          mkdir -p $(dirname app/src/main/java/com/may/games/Theme.kt)
+          cat > app/src/main/java/com/may/games/Theme.kt <<'MAYEOF_5'
+          package com.may.games
+
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.compositionLocalOf
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.lerp
+
+          /** kind: 0 = светлая, 1 = тёмная, 2 = чёрная OLED */
+          data class MayTheme(
+              val ru: String, val en: String, val kind: Int,
+              val bgTop: Color, val bgBottom: Color, val accent: Color,
+              val card: Color, val text: Color, val sub: Color,
+          )
+
+          private fun light(ru: String, en: String, accent: Long, tint: Long): MayTheme {
+              val t = Color(tint)
+              val txt = Color(0xFF2A1A22)
+              return MayTheme(ru, en, 0, t, lerp(t, Color.White, 0.55f), Color(accent),
+                  Color.White.copy(alpha = 0.55f), txt, txt.copy(alpha = 0.55f))
+          }
+
+          private fun dark(ru: String, en: String, accent: Long, bg: Long): MayTheme {
+              val b = Color(bg)
+              return MayTheme(ru, en, 1, b, lerp(b, Color.Black, 0.45f), Color(accent),
+                  Color.White.copy(alpha = 0.09f), Color.White, Color.White.copy(alpha = 0.55f))
+          }
+
+          private fun oled(ru: String, en: String, accent: Long): MayTheme =
+              MayTheme(ru, en, 2, Color.Black, Color.Black, Color(accent),
+                  Color.White.copy(alpha = 0.07f), Color.White, Color.White.copy(alpha = 0.5f))
+
+          val THEMES: List<MayTheme> = listOf(
+              // 7 светлых
+              light("Розовая", "Pink", 0xFFFF5C93, 0xFFFFC1D8),
+              light("Синяя", "Blue", 0xFF3D7BFF, 0xFFC4D8FF),
+              light("Светлая", "Light", 0xFF7A6CFF, 0xFFE9E6F5),
+              light("Жёлтая", "Yellow", 0xFFFFB400, 0xFFFFEBB0),
+              light("Мятная", "Mint", 0xFF18B88A, 0xFFBDF1DF),
+              light("Сиреневая", "Lilac", 0xFF9B5CFF, 0xFFDCC8FF),
+              light("Персиковая", "Peach", 0xFFFF7A59, 0xFFFFD2C2),
+              // 6 тёмных
+              dark("Тёмно-оранжевая", "Dark orange", 0xFFFF7A1A, 0xFF2A1B14),
+              dark("Фиолетовая", "Purple", 0xFFA46BFF, 0xFF1E1530),
+              dark("Красная", "Red", 0xFFFF4B55, 0xFF2B1216),
+              dark("Тёмно-синяя", "Navy", 0xFF4C8DFF, 0xFF111C33),
+              dark("Изумрудная", "Emerald", 0xFF22C58B, 0xFF10261F),
+              dark("Розовая ночь", "Pink night", 0xFFFF5C93, 0xFF2A1422),
+              // 6 OLED
+              oled("Чёрно-синяя", "Black blue", 0xFF3D7BFF),
+              oled("Чёрно-розовая", "Black pink", 0xFFFF5C93),
+              oled("Чёрно-красная", "Black red", 0xFFFF3B3B),
+              oled("Чёрно-зелёная", "Black green", 0xFF2EE59D),
+              oled("Чёрно-фиолетовая", "Black purple", 0xFFA46BFF),
+              oled("Чёрно-золотая", "Black gold", 0xFFFFC233),
+          )
+
+          val LocalT = compositionLocalOf { THEMES[0] }
+          val LocalLang = compositionLocalOf { "ru" }
+
+          /** Простой перевод RU/EN. */
+          @Composable
+          fun tr(ru: String, en: String): String = if (LocalLang.current == "ru") ru else en
+          MAYEOF_5
+          mkdir -p $(dirname app/src/main/java/com/may/games/Ui.kt)
+          cat > app/src/main/java/com/may/games/Ui.kt <<'MAYEOF_6'
+          package com.may.games
+
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.Image
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.BoxScope
+          import androidx.compose.foundation.layout.BoxWithConstraints
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.Composable
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.draw.shadow
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.Path
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.rounded.ArrowBack
+          import androidx.compose.material.icons.rounded.Menu
+          import kotlin.math.PI
+          import kotlin.math.sin
+
+          @Composable
+          fun SoftButton(
+              icon: ImageVector, onClick: () -> Unit, modifier: Modifier = Modifier,
+              size: Dp = 44.dp, accent: Boolean = false, active: Boolean = false, desc: String? = null,
+          ) {
+              val t = LocalT.current
+              Box(
+                  modifier.size(size)
+                      .shadow(if (accent) 12.dp else 2.dp, CircleShape, ambientColor = t.accent, spotColor = t.accent)
+                      .clip(CircleShape)
+                      .background(if (accent) t.accent else t.card)
+                      .clickable(onClick = onClick),
+                  contentAlignment = Alignment.Center,
+              ) {
+                  Icon(
+                      icon, desc,
+                      tint = if (accent) Color.White else if (active) t.accent else t.text,
+                      modifier = Modifier.size(size * 0.48f),
+                  )
+              }
+          }
+
+          @Composable
+          fun MayChip(text: String, onClick: () -> Unit, selected: Boolean = false, icon: ImageVector? = null) {
+              val t = LocalT.current
+              Row(
+                  Modifier.clip(RoundedCornerShape(50))
+                      .background(if (selected) t.accent else t.card)
+                      .clickable(onClick = onClick)
+                      .padding(horizontal = 14.dp, vertical = 9.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+              ) {
+                  if (icon != null) {
+                      Icon(icon, null, tint = if (selected) Color.White else t.accent, modifier = Modifier.size(16.dp))
+                      Box(Modifier.size(6.dp))
+                  }
+                  Text(text, color = if (selected) Color.White else t.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+              }
+          }
+
+          @Composable
+          fun TopBar(
+              title: String, onMenu: () -> Unit,
+              right: ImageVector? = null, onRight: () -> Unit = {},
+              left: ImageVector = Icons.Rounded.Menu, onLeft: (() -> Unit)? = null,
+          ) {
+              val t = LocalT.current
+              Row(
+                  Modifier.fillMaxWidth().height(60.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.SpaceBetween,
+              ) {
+                  SoftButton(left, onLeft ?: onMenu, size = 42.dp)
+                  Text(title, color = t.sub, fontSize = 14.sp)
+                  if (right != null) SoftButton(right, onRight, size = 42.dp) else Box(Modifier.size(42.dp))
+              }
+          }
+
+          @Composable
+          fun SectionLabel(text: String, modifier: Modifier = Modifier) {
+              Text(
+                  text.uppercase(), color = LocalT.current.sub, fontSize = 11.sp,
+                  letterSpacing = 1.4.sp, modifier = modifier.padding(vertical = 8.dp),
+              )
+          }
+
+          @Composable
+          fun GameIcon(g: GameItem?, size: Dp) {
+              val t = LocalT.current
+              val shape = RoundedCornerShape(size * 0.24f)
+              if (g?.icon != null) {
+                  Image(g.icon, g.name, Modifier.size(size).clip(shape), contentScale = ContentScale.Crop)
+              } else {
+                  Box(
+                      Modifier.size(size).clip(shape)
+                          .background(Brush.linearGradient(listOf(t.accent.copy(alpha = 0.85f), Color(0xFFA48BFF)))),
+                      contentAlignment = Alignment.Center,
+                  ) {
+                      Text((g?.name?.firstOrNull() ?: '♪').toString().uppercase(), color = Color.White,
+                          fontSize = (size.value * 0.42f).sp, fontWeight = FontWeight.Bold)
+                  }
+              }
+          }
+
+          /** Обложка с мягкими волнами, как в плеере. */
+          @Composable
+          fun WaveCover(modifier: Modifier = Modifier, content: @Composable BoxScope.() -> Unit = {}) {
+              val t = LocalT.current
+              Box(
+                  modifier.clip(RoundedCornerShape(28.dp)).background(
+                      Brush.linearGradient(listOf(t.accent.copy(alpha = 0.35f), Color(0xFFB9A4FF).copy(alpha = 0.55f), Color(0xFF9FD6FF).copy(alpha = 0.4f)))
+                  ),
+                  contentAlignment = Alignment.Center,
+              ) {
+                  Canvas(Modifier.matchParentSize()) {
+                      for (k in 0 until 4) {
+                          val p = Path()
+                          val amp = size.height * (0.06f + 0.02f * k)
+                          val base = size.height * (0.45f + 0.1f * k)
+                          p.moveTo(0f, base)
+                          var x = 0f
+                          while (x <= size.width) {
+                              p.lineTo(x, base + amp * sin((x / size.width * 2f * PI + k).toFloat()))
+                              x += 6f
+                          }
+                          drawPath(p, Color.White.copy(alpha = 0.45f), style = Stroke(width = 3f))
+                      }
+                      drawCircle(Color.White.copy(alpha = 0.25f), size.minDimension * 0.18f, Offset(size.width * 0.3f, size.height * 0.3f))
+                  }
+                  content()
+              }
+          }
+
+          @Composable
+          fun ProgressLine(fraction: Float, modifier: Modifier = Modifier) {
+              val t = LocalT.current
+              Box(modifier.fillMaxWidth().height(14.dp), contentAlignment = Alignment.CenterStart) {
+                  Box(Modifier.fillMaxWidth().height(3.dp).clip(CircleShape).background(t.text.copy(alpha = 0.15f)))
+                  BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+                      val w = maxWidth * fraction.coerceIn(0f, 1f)
+                      Box(Modifier.width(w).height(3.dp).clip(CircleShape).background(t.accent))
+                      Box(Modifier.padding(start = (w - 6.dp).coerceAtLeast(0.dp)).size(12.dp).clip(CircleShape).background(t.accent))
+                  }
+              }
+          }
+
+          fun fmtTime(ms: Long): String {
+              val m = ms / 60_000
+              return "%d:%02d".format(m / 60, m % 60)
+          }
+
+          @Composable
+          fun BackBar(title: String, onBack: () -> Unit, onMenu: () -> Unit) =
+              TopBar(title, onMenu, left = Icons.Rounded.ArrowBack, onLeft = onBack,
+                  right = Icons.Rounded.Menu, onRight = onMenu)
+          MAYEOF_6
+          mkdir -p $(dirname app/src/main/res/drawable/ic_fg.xml)
+          cat > app/src/main/res/drawable/ic_fg.xml <<'MAYEOF_7'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#FFFFFF" android:pathData="M30,44h48a12,12 0 0 1 12,12v6a12,12 0 0 1 -20,9l-4,-4h-24l-4,4a12,12 0 0 1 -20,-9v-6a12,12 0 0 1 12,-12z"/>
+              <path android:fillColor="#FF5C93" android:pathData="M36,52h4v4h4v4h-4v4h-4v-4h-4v-4h4z"/>
+              <path android:fillColor="#FF5C93" android:pathData="M68,54m-3,0a3,3 0 1 0 6,0a3,3 0 1 0 -6,0"/>
+              <path android:fillColor="#FF5C93" android:pathData="M76,60m-3,0a3,3 0 1 0 6,0a3,3 0 1 0 -6,0"/>
+          </vector>
+          MAYEOF_7
+          mkdir -p $(dirname app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml)
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'MAYEOF_8'
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_bg"/>
+              <foreground android:drawable="@drawable/ic_fg"/>
+          </adaptive-icon>
+          MAYEOF_8
+          mkdir -p $(dirname app/src/main/res/values/colors.xml)
+          cat > app/src/main/res/values/colors.xml <<'MAYEOF_9'
+          <resources><color name="ic_bg">#FF5C93</color></resources>
+          MAYEOF_9
+          mkdir -p $(dirname app/src/main/res/values/themes.xml)
+          cat > app/src/main/res/values/themes.xml <<'MAYEOF_10'
+          <resources>
+              <style name="Theme.May" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">@android:color/black</item>
+              </style>
+          </resources>
+          MAYEOF_10
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'MAYEOF_11'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+          }
+          MAYEOF_11
+          mkdir -p $(dirname gradle.properties)
+          cat > gradle.properties <<'MAYEOF_12'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          kotlin.code.style=official
+          MAYEOF_12
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'MAYEOF_13'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "MayGames"
+          include(":app")
+          MAYEOF_13
+      - name: Build
+        run: cd MayGames && gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MayGames-apk
+          path: MayGames/app/build/outputs/apk/debug/app-debug.apk
